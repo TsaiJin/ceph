@@ -412,7 +412,29 @@ void *ImageRequestWQ::_void_dequeue() {
   bool refresh_required = m_image_ctx.state->is_refresh_required();
   {
     RWLock::RLocker locker(m_lock);
+    
+    bool is_write = false;
     if (peek_item->is_write_op()) {
+      is_write = true;
+      // add throttling if write limit is set
+      if (m_image_ctx.max_write_iops) {
+        if (m_image_ctx.qos_status->get_throttling_flag(is_write)) { //write throttling active
+          return nullptr;
+        } else {
+          utime_t curr_L = m_image_ctx.qos_status->get_prev_limit(is_write);
+          utime_t now = ceph_clock_now();
+
+          curr_L += (double) (1.0 / m_image_ctx.max_write_iops);
+          curr_L = (curr_L > now ? curr_L : now);
+          if (curr_L > now) {
+            ldout(m_image_ctx.cct, 20) << "write are ahead by "
+                                       << curr_L - now
+                                       << ", active write throttling" << dendl;
+            schedule_throttling_task(is_write, curr_L);
+            return nullptr;
+          }
+        }
+      }
       if (m_write_blockers > 0) {
         return nullptr;
       }
@@ -453,6 +475,11 @@ void ImageRequestWQ::process(ImageRequest<> *req) {
                  << "req=" << req << dendl;
 
   req->send();
+  bool is_write = req->is_write_op(); 
+  if (m_image_ctx.max_write_iops || m_image_ctx.max_read_iops) {
+    //iops limit is set, update send ts
+    m_image_ctx.qos_status->set_prev_limit(is_write, ceph_clock_now());
+  }
 
   finish_queued_op(req);
   if (req->is_write_op()) {
@@ -461,6 +488,14 @@ void ImageRequestWQ::process(ImageRequest<> *req) {
   delete req;
 
   finish_in_flight_op();
+}
+
+void ImageRequestWQ::schedule_throttling_task(bool is_write, utime_t ts) {
+  Mutex::Locker timer_locker(*(m_image_ctx.m_timer_lock));
+  C_ThrottlingTask* throttling_task = new C_ThrottlingTask(this, is_write);
+  assert(throttling_task);
+  m_image_ctx.qos_status->set_throttling_flag(is_write, true);
+  m_image_ctx.m_timer->add_event_at(ts, throttling_task);
 }
 
 void ImageRequestWQ::finish_queued_op(ImageRequest<> *req) {
@@ -600,6 +635,21 @@ void ImageRequestWQ::handle_blocked_writes(int r) {
   for (auto ctx : contexts) {
     ctx->complete(0);
   }
+}
+
+void ImageRequestWQ::update_throttling(int r, bool is_write) {
+  // disable throttling
+  m_image_ctx.qos_status->set_throttling_flag(is_write, false);
+  
+  // this is not a safe callback, drop m_timer_lock
+  m_image_ctx.m_timer_lock->Unlock();
+  
+  // signal worker thread
+  signal();
+
+  // obtain m_timer_lock before return to timer thread entry loop
+  m_image_ctx.m_timer_lock->Lock();
+
 }
 
 } // namespace io

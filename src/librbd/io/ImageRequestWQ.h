@@ -62,6 +62,7 @@ public:
 
   void set_require_lock_on_read();
   void clear_require_lock_on_read();
+  void update_throttling(int r, bool is_write);
 
 protected:
   void *_void_dequeue() override;
@@ -94,6 +95,19 @@ private:
     }
   };
 
+  struct C_ThrottlingTask : public Context {
+    ImageRequestWQ *aio_work_queue;
+    bool is_write;
+
+    C_ThrottlingTask(ImageRequestWQ *_aio_work_queue, bool _is_write) 
+       : aio_work_queue(_aio_work_queue), is_write(_is_write) {
+    }
+    void finish(int r) override {
+      aio_work_queue->update_throttling(r, is_write);
+    }
+  };
+
+
   ImageCtx &m_image_ctx;
   mutable RWLock m_lock;
   Contexts m_write_blocker_contexts;
@@ -124,6 +138,7 @@ private:
 
   void handle_refreshed(int r, ImageRequest<ImageCtx> *req);
   void handle_blocked_writes(int r);
+  void schedule_throttling_task(bool is_write, utime_t ts);
 };
 
 } // namespace io

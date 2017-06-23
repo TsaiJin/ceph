@@ -15,6 +15,7 @@
 #include "common/Readahead.h"
 #include "common/RWLock.h"
 #include "common/snap_types.h"
+#include "common/Timer.h"
 #include "common/zipkin_trace.h"
 
 #include "include/buffer_fwd.h"
@@ -60,6 +61,53 @@ namespace librbd {
   namespace operation {
   template <typename> class ResizeRequest;
   }
+
+  class ImageQosStatus {
+  public:
+
+    ImageQosStatus() : write_throttling_active(false), read_throttling_active(false) {}
+
+    ~ImageQosStatus() {}
+
+    utime_t get_prev_limit(bool is_write) const {
+      if (is_write) {
+        return prev_write_limit;
+      }
+      else {
+        return prev_read_limit;
+      }
+    }
+
+    void set_prev_limit(bool is_write, utime_t limit) {
+      if (is_write) {
+        prev_write_limit = limit;
+      }
+      else {
+        prev_read_limit = limit;
+      }
+    }
+
+    void set_throttling_flag(bool is_write, bool flag) {
+      if (is_write) {
+        write_throttling_active = flag;
+      }
+      else {
+        read_throttling_active = flag;
+      }
+    }
+
+    bool get_throttling_flag(bool is_write) {
+      if (is_write) {
+        return write_throttling_active;
+      } else {
+        return read_throttling_active;
+      }
+    }
+
+  private:
+    utime_t prev_write_limit, prev_read_limit;
+    bool write_throttling_active, read_throttling_active;
+  };
 
   struct ImageCtx {
     CephContext *cct;
@@ -154,6 +202,9 @@ namespace librbd {
     xlist<operation::ResizeRequest<ImageCtx>*> resize_reqs;
 
     io::ImageRequestWQ *io_work_queue;
+    ImageQosStatus* qos_status;
+    SafeTimer *m_timer;
+    Mutex *m_timer_lock;
     xlist<io::AioCompletion*> completed_reqs;
     EventSocket event_socket;
 
@@ -179,6 +230,7 @@ namespace librbd {
     uint64_t readahead_max_bytes;
     uint64_t readahead_disable_after_bytes;
     uint64_t max_write_iops;
+    uint64_t max_read_iops;
     bool clone_copy_on_read;
     bool blacklist_on_break_lock;
     uint32_t blacklist_expire_seconds;
@@ -287,6 +339,7 @@ namespace librbd {
 			uint64_t off, Context *onfinish, int fadvise_flags,
                         uint64_t journal_tid, ZTracer::Trace *trace);
     void user_flushed();
+    void update_throttling();
     void flush_cache(Context *onfinish);
     void shut_down_cache(Context *on_finish);
     int invalidate_cache(bool purge_on_error);
@@ -302,6 +355,7 @@ namespace librbd {
 
     int flush();
     void flush(Context *on_safe);
+    void schedule_throttling_task(utime_t ts);
 
     void cancel_async_requests();
     void cancel_async_requests(Context *on_finish);
