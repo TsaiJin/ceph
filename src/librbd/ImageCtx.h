@@ -178,6 +178,7 @@ namespace librbd {
     uint32_t readahead_trigger_requests;
     uint64_t readahead_max_bytes;
     uint64_t readahead_disable_after_bytes;
+    uint64_t max_write_iops;
     bool clone_copy_on_read;
     bool blacklist_on_break_lock;
     uint32_t blacklist_expire_seconds;
